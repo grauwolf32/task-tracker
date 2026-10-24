@@ -1,0 +1,44 @@
+# Copy to tasks/t-NNN-short-name.yml and fill the empty values before starting.
+schema_version: "1.0"
+id: ""
+title: ""
+epic: ""
+kind: feature
+priority: P2
+status: pending
+depends_on: []
+goal: ""
+context:
+  specification: []
+scope:
+  in: []
+  out: []
+requirements:
+  - id: R1
+    text: ""
+# Keep relevant cases, or remove a section that does not apply to the change.
+failure_outcomes:
+  - operation: ""
+    permanent: ""
+    retryable: ""
+    ambiguous: ""
+    cancelled: ""
+    timeout: ""
+cardinality:
+  - collection: ""
+    expected: ""
+    maximum: ""
+    bound: ""
+lifecycle:
+  - entity: ""
+    delete: ""
+    cascade: ""
+    retention: ""
+acceptance_criteria:
+  - id: A1
+    given: ""
+    when: ""
+    then: ""
+tests:
+  - command: ""
+    covers: [A1]

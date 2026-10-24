@@ -1,0 +1,13 @@
+schema_version: "1.0"
+tracker_format: file-tasks-v1
+project:
+  name: ""
+execution_policy:
+  require_implementation_commit: true
+  source_of_truth: Task YAML files; BACKLOG.md is generated.
+  readiness: Only completed dependencies satisfy readiness.
+  completion: All acceptance criteria and declared checks pass; record actual evidence.
+  delivery: Follow the repository's branch, review and merge policy.
+# Add a milestone only for a delivery outcome. Each used milestone needs an
+# id, epic, outcome and exit_task referring to its acceptance task.
+milestones: []

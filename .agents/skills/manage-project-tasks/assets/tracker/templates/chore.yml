@@ -1,0 +1,21 @@
+# State what changes and what observable behavior must remain true.
+schema_version: "1.0"
+id: ""
+title: ""
+epic: ""
+kind: chore
+priority: P3
+status: pending
+depends_on: []
+goal: ""
+context:
+  specification: []
+scope:
+  in: []
+  out: []
+acceptance_criteria:
+  - id: A1
+    text: ""
+tests:
+  - command: ""
+    covers: [A1]

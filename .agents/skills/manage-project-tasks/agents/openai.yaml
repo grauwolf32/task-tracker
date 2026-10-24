@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project task management"
+  short_description: "Maintain YAML tasks, dependencies and evidence"
+  default_prompt: "Use $manage-project-tasks to create or update this project’s tasks and record verified delivery."

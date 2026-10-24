@@ -1,0 +1,33 @@
+# Describe the observed failure and every sibling path in scope.
+schema_version: "1.0"
+id: ""
+title: ""
+epic: ""
+kind: defect
+priority: P2
+status: pending
+depends_on: []
+# Add introduced_by: KNOWN-TASK-ID when history establishes the cause.
+goal: ""
+context:
+  specification: []
+  finding: ""
+  reproduction: ""
+  siblings: []
+  provenance: ""
+scope:
+  in: []
+  out: []
+requirements:
+  - id: R1
+    text: ""
+acceptance_criteria:
+  - id: A1
+    given: ""
+    when: ""
+    then: ""
+  - id: A2
+    text: "A regression check fails before the fix and passes after it on the failing boundary."
+tests:
+  - command: ""
+    covers: [A1, A2]

@@ -1,0 +1,4 @@
+schema_version: "1.0"
+# Declare actual lasting project areas before creating tasks. Entries have
+# id, title and scope. A delivery batch belongs in a milestone, not a new epic.
+epics: []
