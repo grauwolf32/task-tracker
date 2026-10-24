@@ -1,7 +1,9 @@
-"""Optimistic YAML edits. Call save_task under the server's snapshot lock.
+"""YAML writes. Call save_task and create_task under the server's snapshot lock.
 
 File replacement is atomic, but an external editor does not share that lock;
 version checks cannot provide a filesystem-wide compare-and-swap transaction.
+Creation never replaces a destination, but an external editor can still change
+another task's identity or dependencies after the server validated its snapshot.
 """
 import hashlib
 import io
@@ -53,6 +55,61 @@ def _remove_owned(path, identity, expected):
             path.unlink()
     except (OSError, ValueError):
         pass
+
+
+def render_new_task(data):
+    codec = YAML()
+    codec.width = 100
+    data = dict(data)
+    if '\n' in data['goal']:
+        data['goal'] = LiteralScalarString(data['goal'])
+    output = io.StringIO()
+    codec.dump(data, output)
+    rendered = output.getvalue()
+    if len(rendered.encode('utf-8')) > MAX_FILE_BYTES:
+        raise EditError('Результат превышает 1 МиБ')
+    return rendered
+
+
+def create_task(root, task_id, rendered):
+    """Publish a validated task exactly once, without replacing any YAML file."""
+    root = Path(root).resolve()
+    filename = task_id.lower() + '.yml'
+    if Path(filename).name != filename:
+        raise EditError('Недопустимый ID')
+    destination = root / filename
+    temporary = None
+    try:
+        # Also protect the alternate extension and case-sensitive filesystems.
+        # The final hard link independently protects the actual destination.
+        for folder in (root, root / 'done'):
+            if folder.is_symlink():
+                raise EditError('Символические ссылки на папки не поддерживаются', 409)
+            if folder.exists():
+                for path in folder.iterdir():
+                    if path.name.casefold() in {filename.casefold(), task_id.casefold() + '.yaml'}:
+                        raise EditError('Файл с таким именем уже существует', 409)
+        descriptor, temporary = tempfile.mkstemp(prefix='.taskline-', suffix='.tmp', dir=root)
+        with os.fdopen(descriptor, 'w', encoding='utf-8', newline='') as stream:
+            stream.write(rendered)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, destination)
+        return filename
+    except EditError:
+        raise
+    except FileExistsError as exc:
+        raise EditError('Файл с таким именем уже существует. Перечитайте задачи.', 409) from exc
+    except OSError as exc:
+        raise EditError(f'Не удалось создать файл: {exc.strerror or str(exc)}', 500) from exc
+    finally:
+        if temporary:
+            try:
+                Path(temporary).unlink()
+            except OSError:
+                # After publication, cleanup failure must not report a failed create.
+                # Hidden .tmp files are ignored by discovery and never retried.
+                pass
 
 
 def save_task(root, item, changes, expected):

@@ -7,11 +7,14 @@ import math
 import threading
 import json
 import mimetypes
+import re
+from collections import Counter
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, unquote
 import yaml
-from storage import MAX_FILE_BYTES, STATUSES, save_task, task_version, read_yaml_file, EditError
+from storage import (MAX_FILE_BYTES, STATUSES, save_task, create_task, render_new_task,
+                     task_version, read_yaml_file, EditError)
 
 PUBLIC = Path(__file__).parent / 'public'
 MAX_FILES = 10000
@@ -19,6 +22,10 @@ MAX_TOTAL_BYTES = 48 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 MAX_VALUE_NODES = 50000
 MAX_VALUE_DEPTH = 50
+PRIORITIES = {'P0', 'P1', 'P2', 'P3'}
+KINDS = {'feature', 'defect', 'chore'}
+ID_PATTERN = r'[A-Z][A-Z0-9]*-[0-9]{3,}'
+MAX_DEPENDENCIES = 100
 
 
 class StrictLoader(getattr(yaml, 'CSafeLoader', yaml.SafeLoader)):
@@ -100,8 +107,7 @@ def validate_task(data):
     for key in ('status', 'priority', 'kind', 'epic', 'milestone', 'goal'):
         if key in data and not isinstance(data[key], str):
             raise ValueError(f'Поле {key} должно быть строкой')
-    for key, allowed in [('status', STATUSES), ('priority', {'P0', 'P1', 'P2', 'P3'}),
-                         ('kind', {'feature', 'defect', 'chore'})]:
+    for key, allowed in [('status', STATUSES), ('priority', PRIORITIES), ('kind', KINDS)]:
         if key in data and data[key] not in allowed:
             raise ValueError(f'Неизвестное значение {key}: {data[key]}')
     for key in ('depends_on', 'languages'):
@@ -164,9 +170,126 @@ def load_tasks(root):
     epics = load_epics(root, errors)
     snapshot = {'tasks': tasks, 'epics': epics, 'errors': errors, 'source': str(root),
                 'project': root.parent.name, 'complete': complete}
+    snapshot['creation'] = creation_options(root, snapshot)
     if len(json.dumps(snapshot, ensure_ascii=False).encode('utf-8')) > MAX_RESPONSE_BYTES:
         raise ValueError('Результат превышает 64 МиБ')
     return snapshot
+
+
+def suggested_id(tasks):
+    """A suggestion, never a reservation; all IDs are rechecked on POST."""
+    parts = []
+    for item in tasks:
+        task_id = item['data']['id']
+        if re.fullmatch(ID_PATTERN, task_id) and len(task_id) <= 64:
+            prefix, number = task_id.rsplit('-', 1)
+            parts.append((prefix, int(number), len(number)))
+    if not parts:
+        return 'T-001'
+    counts = Counter(prefix for prefix, _, _ in parts)
+    families = [re.fullmatch(r'([A-Z]+)([0-9]+)', prefix) for prefix in counts]
+    if all(families) and len({match[1] for match in families}) == 1:
+        prefix = max(counts, key=lambda value: (int(re.search(r'[0-9]+$', value)[0]), value))
+    else:
+        def natural(value):
+            return tuple((0, int(piece)) if piece.isdigit() else (1, piece)
+                         for piece in re.split(r'([0-9]+)', value) if piece)
+        prefix = min(counts, key=lambda value: (-counts[value], natural(value), value))
+    selected = [(number, width) for candidate, number, width in parts if candidate == prefix]
+    number = max(number for number, _ in selected) + 1
+    width = max(3, max(width for _, width in selected))
+    candidate = f'{prefix}-{number:0{width}d}'
+    # A valid existing ID can already consume the full 64-character budget.
+    return candidate if len(candidate) <= 64 else ''
+
+
+def creation_options(root, snapshot):
+    catalog = any((Path(root) / name).exists() or (Path(root) / name).is_symlink()
+                  for name in ('epics.yml', 'epics.yaml'))
+    epics = snapshot['epics'] if catalog else [
+        {'id': epic, 'title': epic, 'scope': ''}
+        for epic in sorted({item['data']['epic'] for item in snapshot['tasks']
+                            if item['data'].get('epic', '').strip()})]
+    return {'suggested_id': suggested_id(snapshot['tasks']), 'epics': epics,
+            'max_dependencies': MAX_DEPENDENCIES, 'id_pattern': ID_PATTERN}
+
+
+def validate_creation(changes, snapshot):
+    allowed = {'id', 'title', 'goal', 'epic', 'priority', 'kind', 'depends_on',
+               'acceptance_criteria', 'tests'}
+    if not isinstance(changes, dict) or set(changes) - allowed:
+        raise EditError('Недопустимые поля новой задачи')
+    for key, limit in [('id', 64), ('title', 500), ('goal', 64000),
+                       ('epic', MAX_FILE_BYTES), ('priority', 2), ('kind', 7)]:
+        value = changes.get(key, 'feature' if key == 'kind' else None)
+        if not isinstance(value, str) or not value.strip() or len(value) > limit or '\x00' in value:
+            raise EditError(f'Недопустимое значение {key}')
+        try:
+            value.encode('utf-8')
+        except UnicodeEncodeError as exc:
+            raise EditError(f'Недопустимый Unicode в {key}') from exc
+    task_id = changes['id']
+    if not re.fullmatch(ID_PATTERN, task_id):
+        raise EditError('ID должен иметь вид T-001 или V414-001')
+    if changes['priority'] not in PRIORITIES or changes.get('kind', 'feature') not in KINDS:
+        raise EditError('Неизвестный приоритет или тип задачи')
+    if changes['epic'] not in {epic['id'] for epic in snapshot['creation']['epics']}:
+        raise EditError('Выберите эпик из каталога проекта или существующих задач')
+    tasks = {item['data']['id']: item['data'] for item in snapshot['tasks']}
+    if task_id.casefold() in {existing.casefold() for existing in tasks}:
+        raise EditError('Задача с таким ID уже существует', 409)
+    dependencies = changes.get('depends_on', [])
+    if not string_list(dependencies) or len(dependencies) > MAX_DEPENDENCIES:
+        raise EditError(f'Зависимости должны быть массивом из не более {MAX_DEPENDENCIES} ID')
+    if len(dependencies) != len(set(dependencies)):
+        raise EditError('Зависимости не должны повторяться')
+    if task_id in dependencies:
+        raise EditError('Задача не может зависеть от самой себя')
+    if any(dependency not in tasks for dependency in dependencies):
+        raise EditError('Одна из зависимостей больше не существует или имеет неоднозначный ID')
+    visited, pending = set(), list(dependencies)
+    while pending:
+        dependency = pending.pop()
+        if dependency == task_id:
+            raise EditError('Новая задача создаёт цикл зависимостей')
+        if dependency not in visited:
+            visited.add(dependency)
+            pending.extend(tasks.get(dependency, {}).get('depends_on', []))
+    criteria, commands = changes.get('acceptance_criteria', []), changes.get('tests', [])
+    for key, values in [('acceptance_criteria', criteria), ('tests', commands)]:
+        if not string_list(values) or len(values) > 100:
+            raise EditError(f'{key}: ожидается массив из не более 100 строк')
+        for value in values:
+            if not value.strip() or len(value) > 4000 or '\x00' in value:
+                raise EditError(f'Недопустимая строка в {key}')
+            try:
+                value.encode('utf-8')
+            except UnicodeEncodeError as exc:
+                raise EditError(f'Недопустимый Unicode в {key}') from exc
+    if bool(criteria) != bool(commands):
+        raise EditError('Критерии приёмки и команды проверок нужно заполнить вместе')
+    acceptance = [{'id': f'A{index + 1}', 'text': text} for index, text in enumerate(criteria)]
+    return {'schema_version': '1.0', 'id': task_id, 'title': changes['title'],
+            'status': 'pending', 'priority': changes['priority'], 'epic': changes['epic'],
+            'kind': changes.get('kind', 'feature'), 'depends_on': dependencies,
+            'goal': changes['goal'], 'scope': {'in': [changes['goal']], 'out': []},
+            'acceptance_criteria': acceptance,
+            'tests': [{'command': command, 'covers': [criterion['id'] for criterion in acceptance]}
+                      for command in commands]}
+
+
+def check_creation_capacity(root, snapshot, data, rendered):
+    if len(snapshot['tasks']) >= MAX_FILES:
+        raise EditError(f'Слишком много файлов: максимум {MAX_FILES}', 409)
+    total = sum(len(item['raw'].encode('utf-8')) for item in snapshot['tasks'])
+    if total + len(rendered.encode('utf-8')) > MAX_TOTAL_BYTES:
+        raise EditError('Новая задача превысит общий размер файлов 48 МиБ', 409)
+    item = {'data': data, 'file': data['id'].lower() + '.yml', 'raw': rendered,
+            'version': task_version(rendered)}
+    projected = {**snapshot, 'tasks': [*snapshot['tasks'], item]}
+    projected['creation'] = creation_options(root, projected)
+    if len(json.dumps(projected, ensure_ascii=False).encode('utf-8')) > MAX_RESPONSE_BYTES:
+        raise EditError('Новая задача превысит размер ответа 64 МиБ', 409)
 
 
 def source_revision(root):
@@ -195,7 +318,7 @@ def load_epics(root, errors):
     epics, seen = [], set()
     for name in ('epics.yml', 'epics.yaml'):
         path = Path(root) / name
-        if not path.exists():
+        if not path.exists() and not path.is_symlink():
             continue
         try:
             data = json_value(yaml.load(read_yaml_file(root, path), Loader=StrictLoader))
@@ -204,8 +327,8 @@ def load_epics(root, errors):
             pending = []
             local_ids = set()
             for epic in data['epics']:
-                if not isinstance(epic, dict) or not all(isinstance(epic.get(k), str) for k in ('id', 'title')):
-                    raise ValueError('У эпика должны быть строковые id и title')
+                if not isinstance(epic, dict) or not all(isinstance(epic.get(k), str) and epic[k].strip() for k in ('id', 'title')):
+                    raise ValueError('У эпика должны быть непустые строковые id и title')
                 if epic['id'] in seen or epic['id'] in local_ids:
                     raise ValueError(f"Повторяющийся эпик: {epic['id']}")
                 if 'scope' in epic and not isinstance(epic['scope'], str):
@@ -242,6 +365,52 @@ def make_handler(root):
             origin = self.headers.get('Origin')
             return host in hosts and (not origin or origin == f'http://{host}')
 
+        def read_json_body(self):
+            if len(self.headers.get_all('Content-Length', [])) != 1 or self.headers.get('Transfer-Encoding'):
+                raise EditError('Ожидается один Content-Length без Transfer-Encoding', 400)
+            length = int(self.headers.get('Content-Length', '0'))
+            if length <= 0 or length > 256 * 1024:
+                raise EditError('Недопустимый размер запроса', 413)
+            if self.headers.get_content_type() != 'application/json':
+                raise EditError('Ожидается application/json', 415)
+            payload = self.rfile.read(length)
+            if len(payload) != length:
+                raise EditError('Тело запроса получено не полностью', 400)
+            try:
+                return json.loads(payload, object_pairs_hook=unique_json_object)
+            except RecursionError as exc:
+                raise EditError('Слишком сложная структура JSON') from exc
+
+        def do_POST(self):
+            if not self.valid_origin():
+                self.respond(403, 'application/json', b'{"error":"Invalid origin"}')
+                return
+            if urlsplit(self.path).path != '/api/tasks':
+                self.respond(404, 'application/json', b'{"error":"Not found"}')
+                return
+            try:
+                changes = self.read_json_body()
+                with lock:
+                    try:
+                        revision = source_revision(root)
+                        snapshot = load_tasks(root)
+                    except (ValueError, OSError) as exc:
+                        raise EditError('Не удалось проверить все файлы задач. Создание отключено.', 409) from exc
+                    if not snapshot['complete'] or snapshot['errors']:
+                        raise EditError('Исправьте ошибки YAML и перечитайте полный список перед созданием задачи.', 409)
+                    data = validate_creation(changes, snapshot)
+                    rendered = render_new_task(data)
+                    check_creation_capacity(root, snapshot, data, rendered)
+                    if source_revision(root) != revision:
+                        raise EditError('Файлы изменились во время проверки. Перечитайте задачи.', 409)
+                    file = create_task(root, data['id'], rendered)
+                    cache.clear()
+                self.respond(201, 'application/json', json.dumps({'id': data['id'], 'file': file}).encode())
+            except EditError as exc:
+                self.respond(exc.status, 'application/json', json.dumps({'error': str(exc)}).encode())
+            except (ValueError, OSError, UnicodeError) as exc:
+                self.respond(400, 'application/json', json.dumps({'error': str(exc)[:400]}).encode())
+
         def do_PUT(self):
             if not self.valid_origin():
                 self.respond(403, 'application/json', b'{"error":"Invalid origin"}')
@@ -251,17 +420,7 @@ def make_handler(root):
                 self.respond(404, 'application/json', b'{"error":"Not found"}')
                 return
             try:
-                if len(self.headers.get_all('Content-Length', [])) != 1 or self.headers.get('Transfer-Encoding'):
-                    raise EditError('Ожидается один Content-Length без Transfer-Encoding', 400)
-                length = int(self.headers.get('Content-Length', '0'))
-                if length <= 0 or length > 256 * 1024:
-                    raise EditError('Недопустимый размер запроса', 413)
-                if self.headers.get_content_type() != 'application/json':
-                    raise EditError('Ожидается application/json', 415)
-                payload = self.rfile.read(length)
-                if len(payload) != length:
-                    raise EditError('Тело запроса получено не полностью', 400)
-                changes = json.loads(payload, object_pairs_hook=unique_json_object)
+                changes = self.read_json_body()
                 task_id = unquote(route.removeprefix('/api/tasks/'))
                 with lock:
                     snapshot = load_tasks(root)
