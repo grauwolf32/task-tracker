@@ -5,7 +5,7 @@ const labels = {pending:'В очереди',in_progress:'В работе',comple
 const kinds = {feature:'Возможность',defect:'Ошибка',chore:'Улучшение'};
 const statusIcons = {pending:'◌',in_progress:'◔',completed:'✓',deferred:'◷',archived:'▣'};
 const names = {goal:'Цель',scope:'Границы задачи',in:'Входит в задачу',out:'Вне задачи',context:'Контекст',requirements:'Требования',acceptance_criteria:'Критерии приёмки',tests:'Проверки',failure_outcomes:'Исходы ошибок',cardinality:'Объёмы и ограничения',lifecycle:'Жизненный цикл',specification:'Спецификация',design:'Дизайн',proposal:'Предложение',finding:'Наблюдение',siblings:'Связанные пути',revalidated:'Повторная проверка',review:'Ревью',given:'Дано',when:'Когда',then:'Ожидаемый результат',text:'Описание',operation:'Операция',permanent:'Постоянная ошибка',retryable:'Повторная попытка',ambiguous:'Неопределённый исход',cancelled:'Отмена',timeout:'Тайм-аут',collection:'Коллекция',expected:'Ожидаемый объём',maximum:'Максимум',bound:'Ограничение',entity:'Сущность',delete:'Удаление',cascade:'Каскад',retention:'Хранение',notes:'Заметки',implementation_commit:'Коммит реализации',introduced_by:'Источник изменения',milestone:'Этап',languages:'Языки',covers:'Покрытие',command:'Команда'};
-const state = {tasks:[],byId:new Map(),nav:'active',view:'list',page:1,size:40,search:'',status:'',priority:'',kind:'',epic:'',milestone:'',sort:'status',descending:false,epics:new Map(),selected:null,tab:'overview',errors:[]};
+const state = {tasks:[],byId:new Map(),nav:'active',view:'list',page:1,size:40,search:'',status:'',priority:'',kind:'',epic:'',milestone:'',sort:'status',descending:false,epics:new Map(),epicId:null,epicSearch:'',epicPage:1,epicSize:24,selected:null,tab:'overview',errors:[]};
 let previousFocus, previousTaskId;
 const own = (object, key) => Object.hasOwn(object, key);
 const lookup = (object, key, fallback) => own(object, key) ? object[key] : fallback;
@@ -32,12 +32,74 @@ function compareTasks(a,b){
     else result=epicTitle(x.epic).localeCompare(epicTitle(y.epic),'ru',{numeric:true});
     return (state.descending?-result:result)||String(x.priority||'P9').localeCompare(String(y.priority||'P9'))||y.id.localeCompare(x.id,undefined,{numeric:true});
 }
-function epicSummary(){
-    const epic=state.epics.get(state.epic),el=$('#epic-summary');
-    el.hidden=!state.epic;
-    if(!state.epic)return;
-    const tasks=state.tasks.filter(i=>i.data.epic===state.epic),done=tasks.filter(i=>i.data.status==='completed').length;
-    el.innerHTML=`<div><strong>${esc(epicTitle(state.epic))}</strong><span>${esc(state.epic)} · ${done} / ${tasks.length} завершено</span></div>${epic?.scope?`<p>${esc(epic.scope)}</p>`:''}`;
+function epicGroups(){
+    const groups=new Map([...state.epics].map(([id,epic])=>[id,{...epic,known:true,total:0,counts:new Map()}]));
+    for(const {data:t} of state.tasks){
+        if(typeof t.epic!=='string' || !t.epic.trim())continue;
+        if(!groups.has(t.epic))groups.set(t.epic,{id:t.epic,title:t.epic,scope:'',specs:[],known:false,total:0,counts:new Map()});
+        const group=groups.get(t.epic);group.total++;group.counts.set(t.status,(group.counts.get(t.status)||0)+1);
+    }
+    return groups;
+}
+function epicProgress(epic){
+    const done=epic.counts.get('completed')||0,percent=epic.total?Math.round(done/epic.total*100):0;
+    return `<div class="epic-progress-label"><span>${number(done)} / ${number(epic.total)} завершено</span><strong>${percent}%</strong></div><progress class="epic-progress" aria-label="Завершённые задачи" max="100" value="${percent}">${percent}%</progress>`;
+}
+function epicCounts(epic){
+    return `<div class="epic-counts">${Object.entries(labels).map(([status,label])=>`<span>${esc(label)} <b>${number(epic.counts.get(status)||0)}</b></span>`).join('')}${[...epic.counts].some(([s])=>!own(labels,s))?`<span>Другие <b>${number([...epic.counts].filter(([s])=>!own(labels,s)).reduce((n,[,count])=>n+count,0))}</b></span>`:''}</div>`;
+}
+function epicSummary(groups=epicGroups()){
+    const detail=state.nav==='epic',id=detail?state.epicId:state.epic,epic=groups.get(id),el=$('#epic-summary');
+    el.hidden=!id || state.nav==='epics';
+    if(el.hidden)return;
+    if(!epic){el.innerHTML='<div class="empty"><strong>Эпик не найден</strong>В каталоге и прочитанных задачах больше нет этого направления.</div>';return;}
+    const specs=Array.isArray(epic.specs)?epic.specs:[];
+    const expanded=Boolean($('#epic-specs')?.open),specScroll=$('#epic-specs-list')?.scrollTop||0,specFocused=document.activeElement?.id==='epic-specs-toggle';
+    el.innerHTML=`<div class="epic-detail-meta"><span class="task-id">${esc(id)}</span>${epic.known?'':'<span class="epic-unlisted">Нет в каталоге</span>'}${detail?'':`<button class="button" data-open-epic="${esc(id)}">Открыть эпик →</button>`}</div>${detail?'':`<strong>${esc(epic.title)}</strong>`}${epic.scope?`<p class="epic-scope">${esc(epic.scope)}</p>`:'<p class="epic-scope">Описание не задано.</p>'}${epicProgress(epic)}${detail?epicCounts(epic)+'<p class="epic-count-note">Все задачи эпика, включая архив. Фильтры ниже меняют только список задач.</p>':''}${detail&&specs.length?`<details id="epic-specs" ${expanded?'open':''}><summary id="epic-specs-toggle">Документы · ${specs.length}</summary><ul id="epic-specs-list">${specs.map(spec=>`<li><code>${esc(spec)}</code></li>`).join('')}</ul></details>`:''}`;
+    if($('#epic-specs-list'))$('#epic-specs-list').scrollTop=specScroll;
+    if(specFocused)$('#epic-specs-toggle')?.focus({preventScroll:true});
+}
+function renderEpics(groups){
+    const query=state.epicSearch.trim().toLowerCase();
+    const list=[...groups.values()].filter(epic=>[epic.id,epic.title,epic.scope].some(value=>String(value||'').toLowerCase().includes(query))).sort((a,b)=>a.title.localeCompare(b.title,'ru',{numeric:true})||a.id.localeCompare(b.id));
+    const pages=Math.max(1,Math.ceil(list.length/state.epicSize));state.epicPage=Math.min(Math.max(1,state.epicPage),pages);
+    $('#epics-result').textContent=`Эпиков найдено: ${number(list.length)}`;
+    $('#epics-content').innerHTML=list.length?`<div class="epics-grid">${list.slice((state.epicPage-1)*state.epicSize,state.epicPage*state.epicSize).map(epic=>`<button class="epic-card" data-open-epic="${esc(epic.id)}"><span class="epic-card-top"><span class="task-id">${esc(epic.id)}</span>${epic.known?'<span aria-hidden="true">↗</span>':'<span class="epic-unlisted">Нет в каталоге</span>'}</span><strong>${esc(epic.title)}</strong><p>${esc(epic.scope||'Описание не задано.')}</p>${epicProgress(epic)}${epicCounts(epic)}</button>`).join('')}</div>`:`<div class="empty"><strong>${query?'Эпиков не найдено':'Эпиков пока нет'}</strong>${query?'Измените поисковый запрос.':'Направления появятся из epics.yml или поля epic в задачах.'}</div>`;
+    const unassigned=state.tasks.filter(({data:t})=>typeof t.epic!=='string'||!t.epic.trim()).length;
+    $('#epics-unassigned').hidden=!unassigned;$('#epics-unassigned').textContent=`Задач без направления: ${number(unassigned)}. Они доступны в общем списке.`;
+    $('#epics-range').textContent=`${list.length?(state.epicPage-1)*state.epicSize+1:0}–${Math.min(state.epicPage*state.epicSize,list.length)} из ${number(list.length)} эпиков`;
+    $('#epics-page').textContent=`${state.epicPage} / ${pages}`;$('#epics-previous').disabled=state.epicPage===1;$('#epics-next').disabled=state.epicPage>=pages;
+}
+function baseRoute(){return state.nav==='epics'?'#epics':state.nav==='epic'?'#epic/'+encodeURIComponent(state.epicId):location.pathname;}
+function openEpics(){
+    if((state.selected||state.creating)&&!closeTask())return false;
+    state.nav='epics';state.epicId=null;render();$('#page-title').focus();history.replaceState(null,'',baseRoute());return true;
+}
+function openEpic(id){
+    if(typeof id!=='string'||!id.trim())return false;
+    if((state.selected||state.creating)&&!closeTask())return false;
+    state.nav='epic';state.epicId=id;
+    for(const key of ['search','status','priority','kind','milestone']){state[key]='';$('#'+key).value='';}
+    state.epic=id;state.page=1;options();render();$('#page-title').focus();history.replaceState(null,'',baseRoute());return true;
+}
+function navigateTasks(nav){
+    if(nav==='epics')return openEpics();
+    if((state.selected||state.creating)&&!closeTask())return false;
+    state.nav=nav;state.epicId=null;reset();history.replaceState(null,'',baseRoute());return true;
+}
+function applyRoute(){
+    const hash=location.hash;
+    if(hash==='#epics'){
+        if(state.nav!=='epics'||state.selected||state.creating)return openEpics();
+    }else if(hash.startsWith('#epic/')){
+        let id;try{id=decodeURIComponent(hash.slice(6));}catch{return false;}
+        if(state.nav!=='epic'||state.epicId!==id||state.selected||state.creating)return openEpic(id);
+    }else if(hash){
+        let id;try{id=decodeURIComponent(hash.slice(1));}catch{return false;}
+        if(id!==state.selected&&state.byId.has(id))openTask(id);
+    }else if(state.selected||state.creating)return closeTask();
+    else if(state.nav==='epics'||state.nav==='epic')return navigateTasks('active');
+    return true;
 }
 
 function renderStats(){const all=state.tasks.map(i=>i.data),active=all.filter(t=>!['completed','archived'].includes(t.status)).length,progress=all.filter(t=>t.status==='in_progress').length,done=all.filter(t=>t.status==='completed').length,available=all.filter(ready).length;
@@ -61,13 +123,20 @@ function options(){
 
 function row(item){const t=item.data,blocked=unmet(t).length;return `<tr data-task="${esc(t.id)}"><td><span class="task-id">${esc(t.id)}</span></td><td><button class="title-button" data-task="${esc(t.id)}">${esc(t.title)}</button><div class="row-sub"><span class="kind-${esc(t.kind)}"><i class="kind-dot"></i>${esc(lookup(kinds,t.kind,t.kind||'Задача'))}</span>${t.languages?.length?`<span>·</span><span>${esc(Array.isArray(t.languages)?t.languages.join(', '):t.languages)}</span>`:''}</div></td><td>${statusBadge(t.status)}</td><td>${priority(t.priority)}</td><td><span class="epic-tag">${esc(epicTitle(t.epic))}</span></td><td><span class="deps ${blocked?'blocked':ready(t)?'ready':''}" title="${blocked?'Незавершённые зависимости':'Зависимости завершены'}">${blocked?'◇ '+blocked:dependencies(t).length?'✓ '+dependencies(t).length:'—'}</span></td></tr>`;}
 function card(item){const t=item.data;return `<button class="board-card" data-task="${esc(t.id)}"><span class="task-id">${esc(t.id)}</span><strong>${esc(t.title)}</strong><footer>${priority(t.priority)}<span class="epic-tag">${esc(epicTitle(t.epic))}</span></footer></button>`;}
-function render(){renderStats();epicSummary();const list=filtered(),pages=Math.max(1,Math.ceil(list.length/state.size));state.page=Math.min(state.page,pages);const titles={active:'Все задачи',progress:'В работе',ready:'Готовы к работе',completed:'Завершённые',all:'Весь архив'};$('#page-title').innerHTML=esc(titles[state.nav])+'<span class="heading-dot">.</span>';$('#page-subtitle').textContent=state.nav==='ready'?'Задачи без незавершённых зависимостей. Можно начинать.':state.nav==='all'?'Вся история проекта, включая завершённые и архивные задачи.':'От общей картины к конкретным шагам.';document.querySelectorAll('#navigation .nav').forEach(b=>b.classList.toggle('active',b.dataset.nav===state.nav));$('#result-count').textContent=`Найдено: ${number(list.length)}`;
+function render(){renderStats();const groups=epicGroups(),catalog=state.nav==='epics',detail=state.nav==='epic';
+$('#epics-count').textContent=number(groups.size);$('#epics-area').hidden=!catalog;$('#tasks-area').hidden=catalog;$('#stats').hidden=catalog||detail;$('#epic-back').hidden=!detail;$('#epic').disabled=detail;
+document.querySelectorAll('#navigation .nav').forEach(b=>b.classList.toggle('active',b.dataset.nav===state.nav||(b.dataset.nav==='epics'&&detail)));
+if(catalog){$('#page-title').innerHTML='Эпики<span class="heading-dot">.</span>';$('#page-subtitle').textContent='Направления проекта, их задачи и прогресс.';$('#epic-summary').hidden=true;renderEpics(groups);return;}
+epicSummary(groups);const list=filtered(),pages=Math.max(1,Math.ceil(list.length/state.size));state.page=Math.min(state.page,pages);const titles={active:'Все задачи',progress:'В работе',ready:'Готовы к работе',completed:'Завершённые',all:'Весь архив'};$('#page-title').innerHTML=esc(detail?(groups.get(state.epicId)?.title||state.epicId):titles[state.nav])+'<span class="heading-dot">.</span>';$('#page-subtitle').textContent=detail?'Все задачи выбранного направления.':state.nav==='ready'?'Задачи без незавершённых зависимостей. Можно начинать.':state.nav==='all'?'Вся история проекта, включая завершённые и архивные задачи.':'От общей картины к конкретным шагам.';document.querySelectorAll('#navigation .nav').forEach(b=>b.classList.toggle('active',b.dataset.nav===state.nav||(b.dataset.nav==='epics'&&detail)));$('#result-count').textContent=`Найдено: ${number(list.length)}`;
 if(!list.length){$('#task-content').innerHTML='<div class="empty"><strong>Задач не найдено</strong>Попробуйте другой запрос или сбросьте фильтры.</div>';}
 else if(state.view==='list'){$('#task-content').innerHTML=`<div class="table-wrap"><table><thead><tr><th>ID задачи</th><th>Название</th><th>Статус</th><th>Приоритет</th><th>Направление</th><th>Зависимости</th></tr></thead><tbody>${list.slice((state.page-1)*state.size,state.page*state.size).map(row).join('')}</tbody></table></div>`;}
 else{$('#task-content').innerHTML=`<div class="board">${Object.entries(labels).map(([s,label])=>{const group=list.filter(i=>i.data.status===s);return `<section><div class="column-heading"><span>${statusIcons[s]} ${label}</span><span>${group.length}</span></div>${group.slice((state.page-1)*state.size,state.page*state.size).map(card).join('')}${group.length>state.page*state.size?'<p class="board-more">Продолжение на следующей странице →</p>':''}</section>`;}).join('')}${list.some(i=>!own(labels,i.data.status))?`<section><div class="column-heading">Другие статусы</div>${list.filter(i=>!own(labels,i.data.status)).slice((state.page-1)*state.size,state.page*state.size).map(card).join('')}</section>`:''}</div>`;}
 const boardPages=Math.max(1,...[...Object.keys(labels),'other'].map(s=>Math.ceil(list.filter(i=>s==='other'?!own(labels,i.data.status):i.data.status===s).length/state.size)));const actualPages=state.view==='board'?boardPages:pages;if(state.page>actualPages){state.page=actualPages;render();return;}
 $('#range').textContent=state.view==='list'?`${list.length?(state.page-1)*state.size+1:0}–${Math.min(state.page*state.size,list.length)} из ${number(list.length)} задач`:`До ${state.size} задач на колонку · ${number(list.length)} всего`;$('#page-number').textContent=`${state.page} / ${actualPages}`;$('#previous').disabled=state.page===1;$('#next').disabled=state.page>=actualPages;document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('selected',b.dataset.view===state.view));}
-function reset(){for(const key of ['search','status','priority','kind','epic','milestone']){state[key]='';$('#'+key).value='';}state.page=1;render();}
+function reset(){
+    if(state.nav==='epics'){state.epicSearch='';state.epicPage=1;$('#epics-search').value='';render();return;}
+    for(const key of ['search','status','priority','kind','epic','milestone']){state[key]=key==='epic'&&state.nav==='epic'?state.epicId:'';$('#'+key).value=state[key];}state.page=1;render();
+}
 function valueHTML(v){if(v===null||v===undefined)return '<span class="field-name">—</span>';if(Array.isArray(v))return `<ul>${v.map(i=>`<li>${valueHTML(i)}</li>`).join('')}</ul>`;if(typeof v==='object')return Object.entries(v).map(([k,x])=>`<div><span class="field-name">${esc(names[k]||k)}</span>${typeof x==='object'?valueHTML(x):`<span>${esc(x)}</span>`}</div>`).join('');return esc(v);}
 function section(name,v){if(v===undefined||v===null)return '';return `<h3>${esc(name)}</h3>${typeof v==='string'?`<p>${esc(v)}</p>`:valueHTML(v)}`;}
 function requirements(items){if(!Array.isArray(items))return valueHTML(items);return items.map(i=>`<div class="requirement">${typeof i==='object'&&i!==null?`<strong>${esc(i.id||'')}</strong>${Object.entries(i).filter(([k])=>k!=='id').map(([k,v])=>`<p>${k==='text'?'':`<span class="field-name">${esc(names[k]||k)}</span>`}${valueHTML(v)}</p>`).join('')}`:esc(i)}</div>`).join('');}
@@ -244,7 +313,7 @@ function openCreate(){
     state.createDraft={values,original:JSON.stringify(values),query:'',visible:50};
     $('#drawer').innerHTML=`<div class="drawer-header"><div><span class="task-id">НОВАЯ ЗАДАЧА</span>${statusBadge('pending')}</div><button id="close" aria-label="Закрыть создание задачи">×</button></div><div class="detail-head"><h2 id="detail-title">Новая задача</h2><p class="edit-help">Задача появится в очереди и сохранится в YAML.</p></div><div id="detail-body" class="detail-body"><form id="create-form"><div id="create-notice" class="edit-notice" role="status" hidden></div><div class="create-grid"><div><label for="create-id" class="edit-label">ID задачи</label><input class="edit-input" id="create-id" name="id" required maxlength="64" pattern="[A-Z][A-Z0-9]*-[0-9]{3,}" value="${esc(values.id)}" placeholder="T-001" aria-describedby="create-id-help"></div><div><label for="create-priority" class="edit-label">Приоритет</label><select class="edit-input" id="create-priority" name="priority">${['P0','P1','P2','P3'].map(id=>`<option ${id==='P2'?'selected':''}>${id}</option>`).join('')}</select></div></div><p class="edit-help create-id-help" id="create-id-help">Предложенный ID можно изменить. Он будет проверен при создании.</p><label for="create-title" class="edit-label">Название</label><input class="edit-input" id="create-title" name="title" required maxlength="500" placeholder="Что нужно сделать?"><label for="create-goal" class="edit-label">Описание / цель</label><textarea class="edit-input" id="create-goal" name="goal" required rows="4" maxlength="64000" placeholder="Какой результат ожидается?"></textarea><div class="create-grid"><div><label for="create-epic" class="edit-label">Эпик / направление</label><select class="edit-input" id="create-epic" name="epic" required aria-describedby="create-epic-help"></select></div><div><label for="create-kind" class="edit-label">Тип задачи</label><select class="edit-input" id="create-kind" name="kind">${Object.entries(kinds).map(([id,label])=>`<option value="${id}">${label}</option>`).join('')}</select></div></div><p class="edit-help create-id-help" id="create-epic-help"></p><fieldset class="dependency-picker"><legend>Зависимости</legend><p class="edit-help">Задачи, которые должны завершиться до начала этой. Можно выбрать открытые и завершённые задачи.</p><div id="create-selected" class="dependency-chips"></div><label for="create-dependency-search" class="edit-label">Поиск по ID или названию</label><input type="search" id="create-dependency-search" class="edit-input" placeholder="Найти зависимость…"><p id="create-dependency-count" class="edit-help" aria-live="polite"></p><div id="create-dependency-results" class="dependency-results"></div><button type="button" id="create-dependency-more" class="button">Показать ещё</button></fieldset><details class="create-checks"><summary>Критерии и проверки <span>необязательно</span></summary><label for="create-criteria" class="edit-label">Критерии приёмки — по одному на строку</label><textarea class="edit-input" id="create-criteria" name="criteria" rows="4" maxlength="400100" placeholder="Как понять, что задача выполнена?"></textarea><label for="create-tests" class="edit-label">Команды проверок — по одной на строку</label><textarea class="edit-input" id="create-tests" name="tests" rows="3" maxlength="400100" placeholder="Команда запуска проверки"></textarea><p class="edit-help">Каждая команда проверяет все перечисленные критерии. Заполните оба поля или оставьте оба пустыми. До 100 строк, до 4000 символов в каждой.</p></details><p class="edit-help">Критерии, проверки и другие подробности можно дополнить в YAML позже.</p><div class="edit-actions"><button type="submit" id="create-submit" class="button primary">Создать задачу</button><button type="button" id="create-recheck" class="button" hidden>Проверить результат</button></div></form></div>`;
     $('#drawer').hidden=false;$('#overlay').hidden=false;$('.layout').inert=true;document.body.style.overflow='hidden';
-    history.replaceState(null,'',location.pathname);
+    history.replaceState(null,'',baseRoute());
     $('#close').onclick=closeTask;
     const change=event=>{const draft=state.createDraft;if(!draft || draft.pending || state.creatingBusy)return;const name=event.target.name;if(own(draft.values,name) && name!=='depends_on')draft.values[name]=event.target.value;if(name==='epic')renderCreateEpics();if(name==='id')renderCreateDependencies();};
     $('#create-form').oninput=change;
@@ -375,9 +444,9 @@ function closeTask(){
     state.draft=null;state.savedTask=null;state.selected=null;state.selectedItem=null;state.creating=false;state.createDraft=null;
     $('#drawer').hidden=true;$('#overlay').hidden=true;
     document.body.style.overflow='';$('.layout').inert=false;
-    history.replaceState(null,'',location.pathname);
+    history.replaceState(null,'',baseRoute());
     if(previousFocus?.isConnected)previousFocus.focus();
-    else ([...document.querySelectorAll('.title-button,.board-card')].find(b=>b.dataset.task===previousTaskId)||$('#search')).focus({preventScroll:true});
+    else ([...document.querySelectorAll('.title-button,.board-card')].find(b=>b.dataset.task===previousTaskId)||$(state.nav==='epics'?'#epics-search':'#search')).focus({preventScroll:true});
     return true;
 }
 let refreshTimer, inFlight=false, revision='', retryDelay=2000, currentRefresh=null, readSequence=0;
@@ -408,6 +477,7 @@ async function refreshNow(automatic=false){
         $('#error').innerHTML=data.errors.length?`Не удалось прочитать ${data.errors.length} файлов. Остальные задачи показаны.<details><summary>Подробности</summary><div class="error-list">${data.errors.map(e=>`<div>${esc(e.file)}: ${esc(e.message)}</div>`).join('')}</div></details>`:'';
         $('#last-sync').textContent='Обновлено в '+new Date().toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
         const activeTask=document.activeElement?.closest('[data-task]')?.dataset.task;
+        const activeEpic=document.activeElement?.closest('[data-open-epic]')?.dataset.openEpic;
         options();render();
         reconcileCreation(readNumber);
         if(state.creating){renderCreateEpics();renderCreateDependencies();}
@@ -416,8 +486,9 @@ async function refreshNow(automatic=false){
             state.savedTask=null;
         }
         if(state.selected){const id=state.selected;if(state.byId.has(id))openTask(id,true);else if(state.draft){updateDetailWarning();if(state.tab==='edit')syncEditorSource();}else closeTask();}
-        else if(!state.creating && location.hash){let id;try{id=decodeURIComponent(location.hash.slice(1));}catch{}if(id)openTask(id);}
-        else if(activeTask){[...document.querySelectorAll('.title-button,.board-card')].find(b=>b.dataset.task===activeTask)?.focus({preventScroll:true});}
+        else if(!state.creating && location.hash)applyRoute();
+        if(activeTask&&!state.selected&&!state.creating){[...document.querySelectorAll('.title-button,.board-card')].find(b=>b.dataset.task===activeTask)?.focus({preventScroll:true});}
+        if(activeEpic&&!state.selected&&!state.creating)[...document.querySelectorAll('[data-open-epic]')].find(b=>b.dataset.openEpic===activeEpic)?.focus({preventScroll:true});
         return true;
     }catch(error){
         // The last successful snapshot stays visible until the source recovers.
@@ -434,16 +505,13 @@ window.addEventListener('beforeunload',event=>{
     if(hasUnsaved() || state.saving || state.reloading || state.creatingBusy || state.checkingCreate){event.preventDefault();event.returnValue='';}
 });
 window.addEventListener('hashchange',()=>{
-    let id;
-    try{id=decodeURIComponent(location.hash.slice(1));}catch{return;}
-    if(id===state.selected)return;
-    if(id && state.byId.has(id))openTask(id);
-    else if(!id)closeTask();
-    if(state.selected)history.replaceState(null,'','#'+encodeURIComponent(state.selected));
-    else if(state.creating)history.replaceState(null,'',location.pathname);
+    applyRoute();
+    history.replaceState(null,'',state.selected?'#'+encodeURIComponent(state.selected):baseRoute());
 });
-document.addEventListener('click',event=>{const task=event.target.closest('[data-task]');if(task){openTask(task.dataset.task);return;}const nav=event.target.closest('[data-nav]');if(nav){state.nav=nav.dataset.nav;reset();return;}const view=event.target.closest('[data-view]');if(view){state.view=view.dataset.view;state.page=1;render();return;}const tab=event.target.closest('[data-tab]');if(tab){if(state.saving||state.reloading)return;state.tab=tab.dataset.tab;document.querySelectorAll('.tabs [data-tab]').forEach(b=>b.classList.toggle('selected',b.dataset.tab===state.tab));detailBody();}});
+document.addEventListener('click',event=>{const epic=event.target.closest('[data-open-epic]');if(epic){openEpic(epic.dataset.openEpic);return;}const task=event.target.closest('[data-task]');if(task){openTask(task.dataset.task);return;}const nav=event.target.closest('[data-nav]');if(nav){navigateTasks(nav.dataset.nav);return;}const view=event.target.closest('[data-view]');if(view){state.view=view.dataset.view;state.page=1;render();return;}const tab=event.target.closest('[data-tab]');if(tab){if(state.saving||state.reloading)return;state.tab=tab.dataset.tab;document.querySelectorAll('.tabs [data-tab]').forEach(b=>b.classList.toggle('selected',b.dataset.tab===state.tab));detailBody();}});
 for(const key of ['status','priority','kind','epic','milestone'])$('#'+key).onchange=e=>{state[key]=e.target.value;state.page=1;render();};$('#sort').onchange=e=>{state.sort=e.target.value;state.page=1;render();};$('#sort-direction').onclick=()=>{state.descending=!state.descending;$('#sort-direction').textContent=state.descending?'↓':'↑';$('#sort-direction').setAttribute('aria-pressed',String(state.descending));state.page=1;render();};let searchTimer;$('#search').oninput=e=>{clearTimeout(searchTimer);state.search=e.target.value;searchTimer=setTimeout(()=>{state.page=1;render();},120);};$('#reset').onclick=reset;$('#refresh').onclick=()=>refresh();$('#previous').onclick=()=>{state.page--;render();};$('#next').onclick=()=>{state.page++;render();};$('#overlay').onclick=closeTask;
-document.addEventListener('keydown',event=>{if(event.key==='Escape'&&(state.selected || state.creating))closeTask();if(event.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)&&!state.selected&&!state.creating){event.preventDefault();$('#search').focus();}if(event.key==='Tab'&&(state.selected || state.creating)){const controls=[...$('#drawer').querySelectorAll('button,input,textarea,select,summary,a[href],[tabindex]')].filter(e=>!e.disabled&&e.tabIndex>=0&&e.getClientRects().length);const first=controls[0],last=controls.at(-1);if(!controls.length){event.preventDefault();return;}if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}});
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&(state.selected || state.creating))closeTask();if(event.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)&&!state.selected&&!state.creating){event.preventDefault();$(state.nav==='epics'?'#epics-search':'#search').focus();}if(event.key==='Tab'&&(state.selected || state.creating)){const controls=[...$('#drawer').querySelectorAll('button,input,textarea,select,summary,a[href],[tabindex]')].filter(e=>!e.disabled&&e.tabIndex>=0&&e.getClientRects().length);const first=controls[0],last=controls.at(-1);if(!controls.length){event.preventDefault();return;}if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}});
+$('#epics-search').oninput=e=>{state.epicSearch=e.target.value;state.epicPage=1;render();};
+$('#epics-previous').onclick=()=>{state.epicPage--;render();};$('#epics-next').onclick=()=>{state.epicPage++;render();};$('#epic-back').onclick=openEpics;
 $('#new-task').onclick=openCreate;
 refresh();

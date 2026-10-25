@@ -333,9 +333,12 @@ def load_epics(root, errors):
                     raise ValueError(f"Повторяющийся эпик: {epic['id']}")
                 if 'scope' in epic and not isinstance(epic['scope'], str):
                     raise ValueError('Описание эпика должно быть строкой')
+                specs = epic.get('specs', [])
+                if not string_list(specs) or len(specs) > 100 or any(not value.strip() for value in specs):
+                    raise ValueError('Поле specs эпика должно содержать до 100 непустых строк')
                 local_ids.add(epic['id'])
                 pending.append({'id': epic['id'], 'title': epic['title'],
-                              'scope': epic.get('scope', '')})
+                              'scope': epic.get('scope', ''), 'specs': specs})
             seen.update(local_ids)
             epics.extend(pending)
         except (OSError, ValueError, TypeError, yaml.YAMLError, RecursionError) as exc:

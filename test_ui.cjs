@@ -441,3 +441,140 @@ test('encoded request size accepts exactly 256 KiB and rejects the next byte',as
   payload.goal+='a';
   assert.match(a.run('writeSizeProblem(sizePayload)'),/256 КиБ/);
 });
+
+test('epic catalog includes zero-task and uncatalogued directions with truthful mixed-status progress',async()=>{
+  const a=await app([
+    task('T-1',{status:'completed'}),task('T-2',{status:'archived'}),task('T-3',{status:'pending'}),
+    task('T-4',{status:'in_progress'}),task('T-5',{status:'deferred'}),task('T-6',{status:'custom'}),
+    task('T-7',{epic:'outside'}),task('T-8',{epic:''})
+  ]);
+  a.run("state.epics.set('empty',{id:'empty',title:'Empty',scope:'No work yet'});openEpics()");
+  assert.equal(a.run('epicGroups().size'),3);
+  assert.equal(a.run("epicGroups().get('quality').total"),6);
+  assert.equal(a.run("epicGroups().get('quality').counts.get('completed')"),1);
+  assert.match(a.get('#epics-content').innerHTML,/1 \/ 6 завершено/);
+  assert.match(a.get('#epics-content').innerHTML,/max="100" value="17"/);
+  assert.doesNotMatch(a.get('#epics-content').innerHTML,/style=/);
+  assert.match(a.get('#epics-content').innerHTML,/0 \/ 0 завершено/);
+  assert.match(a.get('#epics-content').innerHTML,/Нет в каталоге/);
+  assert.match(a.get('#epics-unassigned').textContent,/Задач без направления: 1/);
+  assert.equal(a.get('#tasks-area').hidden,true);
+  assert.equal(a.get('#epics-area').hidden,false);
+});
+
+test('epic catalog search and pagination reach every result without changing task filters',async()=>{
+  const a=await app();
+  a.run("state.epics=new Map(Array.from({length:55},(_,i)=>['E'+i,{id:'E'+i,title:'Area '+String(i).padStart(2,'0'),scope:i===54?'Searchable scope':'Scope'}]));state.status='pending';openEpics()");
+  assert.equal((a.get('#epics-content').innerHTML.match(/class="epic-card"/g)||[]).length,24);
+  assert.equal(a.get('#epics-page').textContent,'1 / 3');
+  a.get('#epics-next').onclick();a.get('#epics-next').onclick();
+  assert.match(a.get('#epics-content').innerHTML,/Area 54/);
+  assert.equal(a.get('#epics-next').disabled,true);
+  a.get('#epics-search').oninput({target:{value:'Searchable scope'}});
+  assert.equal(a.get('#epics-page').textContent,'1 / 1');
+  assert.equal((a.get('#epics-content').innerHTML.match(/class="epic-card"/g)||[]).length,1);
+  assert.equal(a.run('state.status'),'pending');
+  a.run('reset()');assert.equal(a.run('state.epicSearch'),'');
+});
+
+test('epic detail includes completed and archived tasks, retains scoped filter after reset',async()=>{
+  const a=await app([task('T-1',{status:'completed'}),task('T-2',{status:'archived'}),task('T-3',{epic:'another'})]);
+  a.run("state.epics.set('quality',{id:'quality',title:'Quality',scope:'Full scope',specs:['docs/spec.md']});openEpic('quality')");
+  assert.equal(a.run('filtered().length'),2);
+  assert.equal(a.get('#epic').disabled,true);
+  assert.match(a.get('#epic-summary').innerHTML,/1 \/ 2 завершено/);
+  assert.match(a.get('#epic-summary').innerHTML,/docs\/spec.md/);
+  a.run("state.status='completed';render()");
+  assert.equal(a.run('filtered().length'),1);
+  assert.match(a.get('#epic-summary').innerHTML,/1 \/ 2 завершено/);
+  a.run('reset()');assert.equal(a.run('state.epic'),'quality');assert.equal(a.run('filtered().length'),2);
+  a.run('openEpics()');assert.equal(a.run('state.nav'),'epics');
+});
+
+test('epic routes, task drawer and create drawer preserve the underlying epic context',async()=>{
+  const a=await app();
+  const writes=[];a.context.history.replaceState=(_a,_b,url)=>{writes.push(url);a.context.location.hash=url.startsWith('#')?url:'';};
+  a.context.location.hash='#epic/quality';a.windowListeners.hashchange();
+  assert.equal(a.run('state.nav'),'epic');assert.equal(a.run('state.epicId'),'quality');
+  assert.equal(a.context.document.activeElement,a.get('#page-title'));
+  a.run("state.status='pending';state.search='Original';openTask('T-1')");
+  assert.equal(writes.at(-1),'#T-1');
+  a.run('closeTask()');assert.equal(writes.at(-1),'#epic/quality');
+  assert.equal(a.run('state.status'),'pending');assert.equal(a.run('state.search'),'Original');
+  a.run('openCreate();closeTask()');assert.equal(writes.at(-1),'#epic/quality');
+  a.context.location.hash='#epics';a.windowListeners.hashchange();
+  assert.equal(a.run('state.nav'),'epics');
+  assert.equal(a.context.document.activeElement,a.get('#page-title'));
+  a.context.location.hash='#T-1';a.windowListeners.hashchange();assert.equal(a.run('state.selected'),'T-1');
+  a.run('closeTask()');assert.equal(writes.at(-1),'#epics');
+});
+
+test('initial epic deep link is applied after the first successful snapshot',async()=>{
+  const a=await app();
+  a.context.location.hash='#epic/quality';
+  await a.run('refresh(true)');assert.equal(a.run('state.nav'),'epic');assert.equal(a.run('state.epicId'),'quality');
+  a.run("state.status='pending';state.page=1");
+  await a.run('refresh(true)');assert.equal(a.run('state.status'),'pending');
+});
+
+test('epic refresh updates metadata and counts, retains missing detail and keeps catalog search',async()=>{
+  const a=await app([task('T-1')]);
+  a.run("openEpics();state.epicSearch='qual';state.epicPage=1;openEpic('quality');state.status='pending'");
+  a.handlers.push(()=>Promise.resolve(response({...snapshot([task('T-1',{status:'completed'})]),epics:[{id:'quality',title:'Renamed',scope:'Changed scope',specs:[]}]})));
+  await a.run('refresh(true)');
+  assert.match(a.get('#page-title').innerHTML,/Renamed/);assert.match(a.get('#epic-summary').innerHTML,/1 \/ 1 завершено/);
+  assert.equal(a.run('state.status'),'pending');assert.equal(a.run('filtered().length'),0);
+  a.handlers.push(()=>Promise.resolve(response({...snapshot([]),epics:[]})));
+  await a.run('refresh(true)');
+  assert.equal(a.run('state.epicId'),'quality');assert.match(a.get('#epic-summary').innerHTML,/Эпик не найден/);
+  a.run('openEpics()');assert.equal(a.run('state.epicSearch'),'qual');
+});
+
+test('epic navigation cannot discard dirty task or creation drafts without confirmation',async()=>{
+  const a=await app();
+  a.context.confirm=()=>false;
+  a.run("openTask('T-1');draftFor(state.selectedItem).values.goal='Keep edit'");
+  assert.equal(a.run("openEpic('quality')"),false);assert.equal(a.run('openEpics()'),false);
+  assert.equal(a.run('state.selected'),'T-1');assert.equal(a.run('state.draft.values.goal'),'Keep edit');
+  a.context.confirm=()=>true;a.run('closeTask();openCreate();state.createDraft.values.title="Keep create"');a.context.confirm=()=>false;
+  assert.equal(a.run("navigateTasks('epics')"),false);assert.equal(a.run('state.createDraft.values.title'),'Keep create');
+  a.run('state.creatingBusy=true');a.context.confirm=()=>true;assert.equal(a.run('openEpics()'),false);
+});
+
+test('epic display escapes metadata and encoded IDs, and keeps file errors visible outside task area',async()=>{
+  const a=await app();
+  a.run("state.epics=new Map([['a/ b#',{id:'a/ b#',title:'<img src=x>',scope:'<script>alert(1)</script>',specs:['<unsafe>.md']}]]);openEpics()");
+  assert.match(a.get('#epics-content').innerHTML,/&lt;img src=x&gt;/);assert.doesNotMatch(a.get('#epics-content').innerHTML,/<script>/);
+  a.run("openEpic('a/ b#')");assert.equal(a.run('baseRoute()'),'#epic/a%2F%20b%23');
+  assert.match(a.get('#epic-summary').innerHTML,/&lt;unsafe&gt;.md/);
+  a.context.location.hash='#epic/a%2F%20b%23';a.windowListeners.hashchange();assert.equal(a.run('state.epicId'),'a/ b#');
+  const html=fs.readFileSync(path.join(__dirname,'public/index.html'),'utf8');
+  assert.ok(html.indexOf('id="error"')<html.indexOf('id="epics-area"'));
+  assert.match(html,/data-nav="epics".*aria-label="Эпики"/);
+});
+
+test('blank epic routes never render the entire task list as an unnamed epic',async()=>{
+  const a=await app();
+  a.run("openEpic('quality')");
+  assert.equal(a.run("openEpic('')"),false);assert.equal(a.run("openEpic('   ')"),false);
+  a.context.location.hash='#epic/%20';a.windowListeners.hashchange();
+  assert.equal(a.run('state.epicId'),'quality');assert.equal(a.run('state.epic'),'quality');
+});
+
+test('changed snapshots restore focused task buttons while on an epic route',async()=>{
+  const a=await app();a.run("openEpic('quality')");a.context.location.hash='#epic/quality';
+  const button=a.get('task-button');button.dataset.task='T-1';button.focus();
+  a.context.document.querySelectorAll=selector=>selector==='.title-button,.board-card'?[button]:[];
+  let markup='';Object.defineProperty(a.get('#task-content'),'innerHTML',{get:()=>markup,set:value=>{markup=value;a.context.document.activeElement=a.get('body');}});
+  await a.run('refresh(true)');
+  assert.equal(a.context.document.activeElement,button);
+});
+
+test('epic document disclosure keeps expansion, scroll and keyboard focus on refresh',async()=>{
+  const a=await app();a.run("state.epics.set('quality',{id:'quality',title:'Quality',specs:['a.md','b.md']});openEpic('quality')");
+  a.get('#epic-specs').open=true;a.get('#epic-specs-list').scrollTop=67;a.get('#epic-specs-toggle').focus();
+  a.run('render()');
+  assert.match(a.get('#epic-summary').innerHTML,/<details id="epic-specs" open>/);
+  assert.equal(a.get('#epic-specs-list').scrollTop,67);
+  assert.equal(a.context.document.activeElement,a.get('#epic-specs-toggle'));
+});

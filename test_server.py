@@ -143,6 +143,12 @@ class LiveTaskTests(unittest.TestCase):
         code, headers, data = self.request(headers={'If-None-Match': tag})
         self.assertEqual(code, 200)
         self.assertEqual(data['epics'][0]['title'], 'Quality engineering')
+        self.assertEqual(data['epics'][0]['specs'], [])
+        tag = headers['ETag']
+        (self.root / 'epics.yml').write_text('epics:\n- id: quality\n  title: Quality engineering\n  scope: Tests and gates\n  specs: [docs/quality.md]\n')
+        code, headers, data = self.request(headers={'If-None-Match': tag})
+        self.assertEqual(code, 200)
+        self.assertEqual(data['epics'][0]['specs'], ['docs/quality.md'])
         tag = headers['ETag']
         (self.root / 'done/task.yml').unlink()
         code, headers, data = self.request(headers={'If-None-Match': tag})
@@ -262,6 +268,25 @@ class ReaderRegressionTests(unittest.TestCase):
         self.assertEqual(result['epics'], [])
         self.assertEqual(len(result['errors']), 1)
 
+    def test_epic_specs_are_bounded_and_invalid_catalogs_remain_visible_as_errors(self):
+        import yaml
+        for invalid in ['docs/spec.md', [None], [42], [' '], ['doc.md'] * 101]:
+            with self.subTest(specs=invalid):
+                self.put('epics.yml', yaml.safe_dump({'epics': [
+                    {'id': 'good', 'title': 'Good'},
+                    {'id': 'bad', 'title': 'Bad', 'specs': invalid}]}))
+                result = load_tasks(self.root)
+                self.assertEqual(result['epics'], [])
+                self.assertEqual(len(result['errors']), 1)
+                self.assertIn('specs', result['errors'][0]['message'])
+        references = [f'docs/spec-{n}.md' for n in range(100)]
+        self.put('epics.yml', yaml.safe_dump({'epics': [
+            {'id': 'empty', 'title': 'Epic without tasks', 'scope': 'Its purpose', 'specs': references}]}))
+        result = load_tasks(self.root)
+        self.assertEqual(result['tasks'], [])
+        self.assertEqual(result['errors'], [])
+        self.assertEqual(result['epics'][0]['specs'], references)
+
 
 class WriteRegressionTests(unittest.TestCase):
     setUp = LiveTaskTests.setUp
@@ -350,7 +375,7 @@ class CreationMetadataTests(unittest.TestCase):
         self.put('task.yml', 'id: T-001\ntitle: Old\nepic: old\n')
         self.put('epics.yml', 'epics:\n- id: current\n  title: Current area\n  scope: Scope\n')
         self.assertEqual(load_tasks(self.root)['creation']['epics'],
-                         [{'id': 'current', 'title': 'Current area', 'scope': 'Scope'}])
+                         [{'id': 'current', 'title': 'Current area', 'scope': 'Scope', 'specs': []}])
         self.put('epics.yml', 'epics: []\n')
         self.assertEqual(load_tasks(self.root)['creation']['epics'], [])
         (self.root / 'epics.yml').unlink()
